@@ -3,5 +3,5 @@ Follow [HDF5 Basic Concept](https://heathered-freon-621.notion.site/HDF5-How-to-
 
 ---
 ## Usage of global parameter **USE_H5**
-- [CASE 1] "USE_H5 = True": Save subPano images in h5py extension file.
-- [CASE 2] "USE_H5 = False": Save subPano images in local folder.
+- [CASE 1] **"USE_H5 = True"**: Save subPano images in h5py extension file.
+- [CASE 2] **"USE_H5 = False"**: Save subPano images in local folder.
