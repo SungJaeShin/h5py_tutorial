@@ -5,7 +5,15 @@ import numpy as np
 import cv2 as cv
 import h5py
 import os
+import torch
 from PIL import Image as pil_Image
+import faiss
+
+# NetVLAD Related
+from utils.arguments import argument_parser
+from utils.tools import import_yaml
+from utils.transforms import *
+from models.models import NetVLAD
 
 # For Debugging
 import pdb
@@ -34,12 +42,23 @@ buffer_mutex = threading.Lock()
 # True -> Save as h5 extension !!
 USE_H5 = True 
 FIRST = True
+DB_METHOD = 1 # 1: save several dataset / 2: save one dataset (resize and fix subPano image: [300, 640, 3])
 h5_filename = "/home/sj/workspace/paper_ws/icra2023/src/ROS_NetVLAD_Panorama/images/subpanoDB.h5"
 # h5 = h5py.File(h5_filename, 'w')
 h5 = h5py.File(h5_filename, 'a') # It can read and write at same time
 
+VLAD_FIRST = True
+h5VLAD_filename = "/home/sj/workspace/paper_ws/icra2023/src/ROS_NetVLAD_Panorama/images/subpanoVLAD.h5"
+h5VLAD = h5py.File(h5VLAD_filename, 'a') # It can read and write at same time
+
 class PanoNetVLAD():
-    def __init__(self):
+    def __init__(self, config, model, device, transforms=None):
+        # Model
+        self.device = device
+        self.config = config
+        self.model = model.to(self.device)
+        self.transforms = transforms
+
         # Sensor_msgs Queue
         self.panoBuf = Queue()
 
@@ -83,8 +102,17 @@ class PanoNetVLAD():
 
             if black_pixel_count_bot / W > thresh:
                 down_cut = h_bot
-
+            
         out = img[up_cut:down_cut, :, :]
+        
+        out_height = str(out.shape[0])
+        print("\033[1;32m Subpano Height: ", out_height, "\033[0m");
+
+        # For Saving H5 file
+        if DB_METHOD == 2:
+            out = cv.resize(out, dsize=(out.shape[1], 300), interpolation=cv.INTER_CUBIC) # [width, height, channel]
+            h5_out_height = str(out.shape[0])
+            print("\033[1;32m For H5 Subpano Height: ", h5_out_height, "\033[0m \n");
 
         return out
 
@@ -108,33 +136,56 @@ class PanoNetVLAD():
 
     def saveSubPanoH5(self, subPano, sequence):
         ##### [CASE 1] Make Several Dataset which get 'N' subPano Images #####
-        # idx = "/subpano/" + str(sequence)
-        # h5.create_dataset(idx, data=subPano)
+        if DB_METHOD == 1:
+            idx = "/subpano/" + str(sequence)
+            h5.create_dataset(idx, data=subPano)
         ######################################################################
 
         ##### [CASE 2] Make Only One Dataset that get all subPano Images #####
-        global FIRST
-        if FIRST == True:
+        if DB_METHOD == 2:
+            global FIRST
+            if FIRST == True:
+                # pdb.set_trace()
+                h5.create_dataset('subpano', data=subPano, maxshape=(None, None, None, None), chunks=True)
+                FIRST = False
+                return
+
+            len1 = h5['subpano'].shape[0]
+            len2 = len(subPano)
+            total_len = np.array([len1+len2, 300, 640, 3])
+            h5['subpano'].resize(total_len)
+            h5['subpano'][len1:] = subPano
+        ######################################################################
+
+    def saveSubVLADH5(self, subVLAD, panoSeq):
+        subVLAD = subVLAD.detach().cpu().numpy()
+
+        global VLAD_FIRST
+        if VLAD_FIRST == True:
             # pdb.set_trace()
-            h5.create_dataset('subpano', data=subPano, maxshape=(None, None, None, None), chunks=True)
-            FIRST = False
+            h5VLAD.create_dataset('subpano', data=subVLAD, maxshape=(None, None), chunks=True)
+            VLAD_FIRST = False
             return
 
-        print("First is False: ", FIRST)
-        pdb.set_trace()
-        
-        
-        ########## Saving cached feature indexes for debugging ##########
-        # h5_filename = "/media/TrainDataset/lfincache.h5"
-        # hf = h5py.File(h5_filename, 'w')
-        # hf.create_dataset('qFeat', data=qFeat)
-        # hf.create_dataset("dbFeat", data=dbFeat)
-        # hf.close()
-        # pdb.set_trace()
-        # hf = h5py.File(h5_filename, 'r')
-        # qFeat = np.array(hf.get('qFeat'))
-        # dbFeat = np.array(hf.get('dbFeat'))
-        #################################################################
+        len1 = h5VLAD['subpano'].shape[0]
+        len2 = len(subVLAD)
+        total_len = np.array([len1+len2, 32768])
+        h5VLAD['subpano'].resize(total_len)
+        h5VLAD['subpano'][len1:] = subVLAD
+
+    def readSubPanoDB(self):
+        ##### [CASE 1] Make Several Dataset which get 'N' subPano Images #####
+        if DB_METHOD == 1:
+            cur_shape = len(h5['subpano'])
+            print("\033[1;33m [CASE 1] Current length DB: ", cur_shape, "\033[0m")
+
+        ##### [CASE 2] Make Only One Dataset that get all subPano Images #####
+        if DB_METHOD == 2:
+            cur_shape = h5['subpano'].shape
+            print("\033[1;33m [CASE 2] Current Shape DB: ", cur_shape, "\033[0m")
+
+        curVLAD_shape = h5VLAD['subpano'].shape
+        print("\033[1;33m [VLAD Case] Current Shape DB: ", curVLAD_shape, "\033[0m")
 
     def makePanoDataset(self):
         # print("Active Thread: ", threading.active_count())
@@ -153,11 +204,11 @@ class PanoNetVLAD():
                 panoWidth = panoFirst.width
                 
                 # Filter Real Pano Images
-                if panoHeight == 0 or panoWidth == 0:
+                if panoHeight < 10 or panoWidth < 10:
                     print("Not Pano Images !!")
                     buffer_mutex.release()
                     continue
-
+   
                 print("pano Height: %d, pano Widht: %d", panoHeight, panoWidth)
 
                 # Initialization of First Panorama Information 
@@ -166,17 +217,29 @@ class PanoNetVLAD():
                 panoSeq = panoFirst.header.seq
                 panoMat = self.convertSensor2Mat(panoFirst)
                 
-                panoPath = "/home/sj/workspace/paper_ws/icra2023/src/ROS_NetVLAD_Panorama/images/panorama/pano_" + str(panoSeq) + ".png"
-                cv.imwrite(panoPath, panoMat)
+                print("\033[1;31m Current Sequence: ", panoSeq, "\033[0m")
 
                 # Prune Black Space of Panorama Image
                 panoMat = self.prune_blank(panoMat)
-                prunePanoPath = "/home/sj/workspace/paper_ws/icra2023/src/ROS_NetVLAD_Panorama/images/prune_pano/prune_pano_" + str(panoSeq) + ".png"
-                cv.imwrite(prunePanoPath, panoMat)
 
+                out_panoMat = panoMat.shape[0]
+                print("\033[1;32m out_panoMat Height: ", out_panoMat, "\033[0m");
+                if out_panoMat < 10:
+                    print("Very Small size after pruning because of black background")
+                    buffer_mutex.release()
+                    continue
+     
                 # Make Sliding Image window of Panorama 
                 # Number of Sliding Image is 10 (Default "n = 10")
                 subPanoMat = self.makeSubPano(panoMat, 10)
+
+                # Convert subPanoMat to Pil
+                subPanoPil = [pil_Image.fromarray(np.uint8(f)) for f in subPanoMat]
+                if self.transforms is not None:
+                    subPanoPil = [self.transforms(f) for f in subPanoPil]
+
+                # Make VLAD Vector using NetVLAD Model
+                subVLAD = self.model(torch.stack(subPanoPil).to(device))
 
                 # Save SubPanorama Image
                 if USE_H5 == True:
@@ -184,13 +247,40 @@ class PanoNetVLAD():
                 else:
                     self.saveSubPano(subPanoMat, panoSeq)
 
-                del panoFirst, panoHeight, panoWidth, panoHeader, panoTime, panoSeq, panoMat
+                # Save Subpanorama VLAD
+                self.saveSubVLADH5(subVLAD, panoSeq)
+
+                del panoFirst, panoHeight, panoWidth, panoHeader, panoTime, panoSeq, panoMat, subPanoPil, subVLAD
+
+                self.readSubPanoDB()
     
             buffer_mutex.release()
 
 if __name__ == '__main__':
     rospy.init_node('NetVLAD_Realsense')
 
-    PanoNetVLAD()
+    device = 'cuda'
+    if device == 'cuda':
+        print("Using CUDA!")
+
+    # Get configuration file of NetVLAD
+    opt = argument_parser()
+    config = import_yaml(opt.config)
+
+    # # Set visible device
+    # os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+    # os.environ["CUDA_VISIBLE_DEVICES"]= str(config['hardware']['gpu_number'])
+
+    # Time Duration
+    start = time.time() 
+
+    # Loading model
+    model = NetVLAD(config)
+    model.load_state_dict(torch.load(opt.ptmodel)['state_dict'])
+    print("Pretained model loaded from: ", opt.ptmodel)
+
+    print("Time duration of getting Pretrained model: ", (time.time()-start))
+
+    PanoNetVLAD(config, model, device, transforms=T_KAIST)
 
     rospy.spin()
