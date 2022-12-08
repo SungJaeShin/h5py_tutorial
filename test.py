@@ -43,12 +43,12 @@ buffer_mutex = threading.Lock()
 USE_H5 = True 
 FIRST = True
 DB_METHOD = 1 # 1: save several dataset / 2: save one dataset (resize and fix subPano image: [300, 640, 3])
-h5_filename = "/home/sj/workspace/paper_ws/icra2023/src/ROS_NetVLAD_Panorama/images/subpanoDB.h5"
+h5_filename = "~/images/subpanoDB.h5"
 # h5 = h5py.File(h5_filename, 'w')
 h5 = h5py.File(h5_filename, 'a') # It can read and write at same time
 
 VLAD_FIRST = True
-h5VLAD_filename = "/home/sj/workspace/paper_ws/icra2023/src/ROS_NetVLAD_Panorama/images/subpanoVLAD.h5"
+h5VLAD_filename = "~/images/subpanoVLAD.h5"
 h5VLAD = h5py.File(h5VLAD_filename, 'a') # It can read and write at same time
 
 class PanoNetVLAD():
